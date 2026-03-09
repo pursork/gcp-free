@@ -44,15 +44,78 @@ sudo cdn-ip-ban install --no-ipv6                # 只封锁 IPv4
 
 ## IP 列表来源 / IP List Sources
 
-| Provider   | 格式   | 来源 / Source |
-|------------|--------|---------------|
-| Cloudflare | 纯文本 | https://www.cloudflare.com/ips-v4 · https://www.cloudflare.com/ips-v6 |
-| Fastly     | JSON   | https://api.fastly.com/public-ip-list |
-| Akamai     | 纯文本 | https://github.com/platformbuilds/Akamai-ASN-and-IPs-List |
+IP 列表由本仓库统一维护（[`lists/`](lists/)），GitHub Actions 每天自动从官方上游同步并提交变更。脚本优先使用仓库列表，不可用时自动回退到官方源。
 
-Cloudflare 和 Fastly 的列表由官方维护；Akamai 列表来自社区整理的 ASN IP 聚合。
+IP lists are maintained in [`lists/`](lists/) and auto-synced daily from official upstreams via GitHub Actions. The script uses repo lists as primary source and falls back to official CDN URLs if unavailable.
 
-Cloudflare and Fastly lists are officially maintained. The Akamai list is community-aggregated from Akamai's ASN.
+| Provider   | 格式        | 官方上游 / Official Upstream |
+|------------|-------------|------------------------------|
+| Cloudflare | 纯文本/text | https://www.cloudflare.com/ips-v4 · /ips-v6 |
+| Fastly     | JSON        | https://api.fastly.com/public-ip-list |
+| Akamai     | 纯文本/text | [platformbuilds/Akamai-ASN-and-IPs-List](https://github.com/platformbuilds/Akamai-ASN-and-IPs-List) |
+
+---
+
+## 如何为本项目做出贡献：添加新 CDN 来源 / Contributing: Add a New CDN Provider
+
+### 第一步：确认 IP 是否属于 CDN / Step 1: Verify an IP belongs to a CDN
+
+**Cloudflare**
+```bash
+# 访问任意 Cloudflare 站点的 /cdn-cgi/trace，返回结果含 fl=（数据中心）和 ip=（你的 IP）
+curl -s https://cloudflare.com/cdn-cgi/trace
+# 或直接查询 1.1.1.1
+curl -s https://1.1.1.1/cdn-cgi/trace
+# 对比 Cloudflare 官方 IP 列表
+curl -s https://www.cloudflare.com/ips-v4
+```
+
+**Fastly**
+```bash
+# Fastly 在响应头中注入 X-Served-By 和 X-Cache，可用 -I 检查
+curl -sI https://www.fastly.com | grep -i "x-served-by\|x-cache"
+# 对比官方 IP 列表（JSON 格式）
+curl -s https://api.fastly.com/public-ip-list | jq '.addresses[]'
+```
+
+**Akamai**
+```bash
+# Akamai 响应头通常含 X-Check-Cacheable 或 AkamaiGHost
+curl -sI https://www.akamai.com | grep -i "akamai\|x-check"
+# 通过反向 DNS 判断（Akamai 节点 PTR 记录通常含 akamai.net / akamaiedge.net）
+dig -x <IP>
+```
+
+**通用方法 / General Methods**
+```bash
+# ASN / 组织信息查询（最直接）
+curl -s https://ipinfo.io/<IP> | jq '{org, asn}'
+# 或用 whois
+whois <IP> | grep -iE "org|netname|descr|owner"
+# 反向 DNS
+dig -x <IP> +short
+```
+
+> 常见 ASN 参考：Cloudflare = AS13335，Fastly = AS54113，Akamai = AS20940 / AS16625
+
+### 第二步：提 PR / Step 2: Open a PR
+
+在 [`providers/`](providers/) 目录下新建 `.conf` 文件，格式如下：
+
+```bash
+# providers/example.conf
+PROVIDER_NAME="Example CDN"
+PROVIDER_FORMAT="text"          # text | fastly_json
+PROVIDER_IPV4_URL="https://example.com/ips-v4.txt"
+PROVIDER_IPV6_URL="https://example.com/ips-v6.txt"
+```
+请在PR中给出为何要阻断该ip/该ip属于付费cdn的证据。
+
+PR会人工审核并合并，可以参考PR的模板。
+
+PR 提交时会自动加载模板，要求提供 IP 归属证明并确认无重复。合并后 GitHub Actions 自动更新 `lists/`，无需手动操作。
+
+When opening a PR, a template will guide you to provide ownership evidence and confirm no duplicates. After merge, GitHub Actions updates `lists/` automatically.
 
 ---
 
@@ -77,3 +140,9 @@ Cloudflare and Fastly lists are officially maintained. The Akamai list is commun
 封锁后，这些 CDN 所承载的网站（Cloudflare Pages、npm CDN、GitHub Assets 等）将无法访问。如需访问，请自行配置代理工具（如 Xray、sing-box）进行流量分流，再卸载或调整封锁规则。
 
 After blocking, websites hosted on these CDNs will be unreachable. Configure your own proxy tool (e.g. Xray, sing-box) to route around the blocks if needed.
+
+---
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=pursork/gcp-free&type=Date)](https://star-history.com/#pursork/gcp-free&Date)

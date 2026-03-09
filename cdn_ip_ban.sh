@@ -23,7 +23,12 @@ readonly LOG_FILE="/var/log/cdn_ip_ban.log"
 readonly LOCK_FILE="/var/run/cdn_ip_ban.lock"
 readonly IP_LIST_DIR="/etc/cdn_blocked_ips"
 
-# Provider IP list URLs
+# Repo-maintained lists (primary source, kept fresh by GitHub Actions)
+# 仓库维护的 IP 列表（主要来源，由 GitHub Actions 每日自动更新）
+readonly REPO_RAW="https://raw.githubusercontent.com/pursork/gcp-free/main/lists"
+
+# Official CDN upstream URLs (fallback if repo lists are unavailable)
+# 官方 CDN 上游地址（仓库列表不可用时的回退源）
 readonly CLOUDFLARE_V4_URL="${CLOUDFLARE_IP_LIST_V4_URL:-https://www.cloudflare.com/ips-v4}"
 readonly CLOUDFLARE_V6_URL="${CLOUDFLARE_IP_LIST_V6_URL:-https://www.cloudflare.com/ips-v6}"
 readonly FASTLY_URL="${FASTLY_IP_LIST_URL:-https://api.fastly.com/public-ip-list}"
@@ -100,76 +105,109 @@ validate_provider() {
 
 # ── IP download functions / IP 下载函数 ───────────────────────────────────────
 
-# Download a plain-text IP list, one IP/CIDR per line
-download_text() {
+fetch_url() {
     local url="$1" dest="$2"
-    local tmp; tmp=$(mktemp)
-    if ! curl -fsSL --connect-timeout 30 --max-time 120 "$url" -o "$tmp" 2>/dev/null; then
-        rm -f "$tmp"; return 1
-    fi
-    grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]+)?$|^[0-9a-fA-F:]+(/[0-9]+)?$' "$tmp" \
-        | sort -u > "$dest"
-    rm -f "$tmp"
+    curl -fsSL --connect-timeout 20 --max-time 90 "$url" -o "$dest" 2>/dev/null
 }
 
-# Download Fastly JSON: {"addresses":["1.2.3.0/24",...]}
-download_fastly_json() {
-    local dest="$1"
+filter_ipv4() { grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]+)?$' | sort -u; }
+filter_ipv6() { grep -E '^[0-9a-fA-F:]+(/[0-9]+)?$' | grep ':' | sort -u; }
+
+# Try repo-maintained list first, fall back to direct upstream URL
+# 优先从仓库 lists/ 下载，失败则回退到官方上游
+fetch_list() {
+    local repo_url="$1" fallback_url="$2" dest="$3" filter_fn="$4"
     local tmp; tmp=$(mktemp)
-    if ! curl -fsSL --connect-timeout 30 --max-time 120 "$FASTLY_URL" -o "$tmp" 2>/dev/null; then
-        rm -f "$tmp"; return 1
+
+    if fetch_url "$repo_url" "$tmp" && [[ -s "$tmp" ]]; then
+        $filter_fn < "$tmp" > "$dest" || true
+        rm -f "$tmp"
+        return 0
     fi
-    { jq -r '.addresses[]?'          "$tmp" 2>/dev/null; \
-      jq -r '.ipv6_addresses[]?'     "$tmp" 2>/dev/null; } \
-        | grep -E '^[0-9]|^[0-9a-fA-F:]' | sort -u > "$dest"
     rm -f "$tmp"
+
+    # Fallback to upstream CDN source
+    print_info "  仓库列表不可用，尝试官方源 / repo list unavailable, trying official source..."
+    tmp=$(mktemp)
+    if fetch_url "$fallback_url" "$tmp" && [[ -s "$tmp" ]]; then
+        $filter_fn < "$tmp" > "$dest" || true
+        rm -f "$tmp"
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
 }
 
-# Download and merge provider IP list; set PROVIDER_V4_FILE / PROVIDER_V6_FILE
+# Download and merge provider IP list
 download_provider_ips() {
     local provider="$1"
     local v4_file="${IP_LIST_DIR}/${provider}_v4.txt"
     local v6_file="${IP_LIST_DIR}/${provider}_v6.txt"
     mkdir -p "$IP_LIST_DIR"
 
+    print_info "下载 ${provider} IPs... / Downloading ${provider} IPs..."
+
     case "$provider" in
         cloudflare)
-            print_info "下载 Cloudflare IPs... / Downloading Cloudflare IPs..."
-            download_text "$CLOUDFLARE_V4_URL" "$v4_file" \
+            fetch_list \
+                "${REPO_RAW}/cloudflare_v4.txt" "$CLOUDFLARE_V4_URL" \
+                "$v4_file" filter_ipv4 \
                 || { print_warning "Cloudflare IPv4 下载失败 / download failed"; return 1; }
             if [[ "$ENABLE_IPV6" == true ]]; then
-                download_text "$CLOUDFLARE_V6_URL" "$v6_file" \
+                fetch_list \
+                    "${REPO_RAW}/cloudflare_v6.txt" "$CLOUDFLARE_V6_URL" \
+                    "$v6_file" filter_ipv6 \
                     || print_warning "Cloudflare IPv6 下载失败 / download failed"
             fi
             ;;
         fastly)
-            print_info "下载 Fastly IPs... / Downloading Fastly IPs..."
-            local tmp_all; tmp_all=$(mktemp)
-            download_fastly_json "$tmp_all" \
-                || { print_warning "Fastly 下载失败 / download failed"; rm -f "$tmp_all"; return 1; }
-            grep -E '^[0-9]' "$tmp_all" | sort -u > "$v4_file" || true
+            # Fastly uses JSON — repo lists are pre-parsed plain text
+            local tmp; tmp=$(mktemp)
+            fetch_list \
+                "${REPO_RAW}/fastly_v4.txt" "$FASTLY_URL" \
+                "$v4_file" filter_ipv4 || {
+                    # If repo list unavailable, parse JSON directly
+                    fetch_url "$FASTLY_URL" "$tmp" \
+                        && jq -r '.addresses[]?' "$tmp" 2>/dev/null \
+                           | filter_ipv4 > "$v4_file" \
+                        || { print_warning "Fastly IPv4 下载失败 / download failed"; rm -f "$tmp"; return 1; }
+                }
             if [[ "$ENABLE_IPV6" == true ]]; then
-                grep -E '^[0-9a-fA-F:]' "$tmp_all" | sort -u > "$v6_file" || true
+                fetch_list \
+                    "${REPO_RAW}/fastly_v6.txt" "$FASTLY_URL" \
+                    "$v6_file" filter_ipv6 || {
+                        fetch_url "$FASTLY_URL" "$tmp" \
+                            && jq -r '.ipv6_addresses[]?' "$tmp" 2>/dev/null \
+                               | filter_ipv6 > "$v6_file" \
+                            || print_warning "Fastly IPv6 下载失败 / download failed"
+                    }
             fi
-            rm -f "$tmp_all"
+            rm -f "$tmp"
             ;;
         akamai)
-            print_info "下载 Akamai IPs... / Downloading Akamai IPs..."
-            local tmp_all; tmp_all=$(mktemp)
-            download_text "$AKAMAI_URL" "$tmp_all" \
-                || { print_warning "Akamai 下载失败 / download failed"; rm -f "$tmp_all"; return 1; }
-            grep -E '^[0-9]' "$tmp_all" | sort -u > "$v4_file" || true
+            fetch_list \
+                "${REPO_RAW}/akamai_v4.txt" "$AKAMAI_URL" \
+                "$v4_file" filter_ipv4 \
+                || { print_warning "Akamai IPv4 下载失败 / download failed"; return 1; }
+            ;;
+        *)
+            # Generic provider: look for repo list by slug name
+            fetch_list \
+                "${REPO_RAW}/${provider}_v4.txt" "" \
+                "$v4_file" filter_ipv4 \
+                || { print_warning "${provider} IPv4 列表不可用 / list unavailable"; return 1; }
             if [[ "$ENABLE_IPV6" == true ]]; then
-                grep -E '^[0-9a-fA-F:]' "$tmp_all" | sort -u > "$v6_file" || true
+                fetch_list \
+                    "${REPO_RAW}/${provider}_v6.txt" "" \
+                    "$v6_file" filter_ipv6 || true
             fi
-            rm -f "$tmp_all"
             ;;
     esac
 
     local v4_count=0 v6_count=0
     [[ -f "$v4_file" ]] && v4_count=$(wc -l < "$v4_file")
     [[ -f "$v6_file" ]] && v6_count=$(wc -l < "$v6_file")
-    print_success "${provider}: IPv4 ${v4_count} 条 / entries, IPv6 ${v6_count} 条 / entries"
+    print_success "${provider}: IPv4 ${v4_count} 条, IPv6 ${v6_count} 条"
 }
 
 # ── ipset / iptables helpers / 规则管理 ───────────────────────────────────────

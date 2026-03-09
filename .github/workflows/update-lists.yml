@@ -1,0 +1,35 @@
+name: Update CDN IP Lists
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 每天 UTC 02:00 / Daily at 02:00 UTC
+  workflow_dispatch:        # 支持手动触发 / Manual trigger
+  push:
+    branches: [main]
+    paths:
+      - 'providers/**'     # 有新 provider 合入时立即更新 / Re-run when providers change
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get install -y jq curl
+
+      - name: Fetch latest IP lists
+        run: bash scripts/update-lists.sh
+
+      - name: Commit updated lists
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: auto-update CDN IP lists [skip ci]"
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
+          file_pattern: "lists/*.txt"
