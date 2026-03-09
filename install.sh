@@ -1,176 +1,49 @@
 #!/usr/bin/env bash
+# cdn-ip-ban 一键安装脚本 / One-line installer
+# 用法 / Usage:
+#   curl -fsSL https://raw.githubusercontent.com/pursork/gcp-free/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/pursork/gcp-free/main/install.sh | sudo bash -s -- --provider=cloudflare
 
 set -euo pipefail
 
+readonly RAW_BASE="https://raw.githubusercontent.com/pursork/gcp-free/main"
 readonly INSTALL_PATH="/usr/local/sbin/cdn_ip_ban.sh"
 readonly LINK_PATH="/usr/local/bin/cdn-ip-ban"
-readonly TPROXY_INSTALL_PATH="/usr/local/sbin/cdn_tproxy.sh"
-readonly TPROXY_LINK_PATH="/usr/local/bin/cdn-ip-ban-tproxy"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-SOURCE_SCRIPT="$SCRIPT_DIR/cdn_ip_ban.sh"
-SOURCE_TPROXY="$SCRIPT_DIR/transparent_proxy.sh"
-RAW_BASE_URL=""
-EXPECTED_SHA256=""
-AUTO_APPLY=true
-declare -a APPLY_ARGS=()
+RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; NC='\033[0m'
+info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
+success() { echo -e "${GREEN}[OK]${NC}   $*"; }
+error()   { echo -e "${RED}[ERR]${NC}  $*" >&2; exit 1; }
 
-print_usage() {
-    cat << EOF
-Usage: sudo ./install.sh [OPTIONS]
+[[ $EUID -eq 0 ]] || error "请以 root 运行 / Run as root (sudo)"
 
-Options:
-  --raw-base=URL   Download cdn_ip_ban.sh from URL/cdn_ip_ban.sh when local file is missing
-  --script-sha256=HEX
-                   Verify downloaded cdn_ip_ban.sh sha256
-  --no-apply       Only install command files, do not apply iptables rules immediately
-  --help           Show this help message
+# Collect any extra args to pass to cdn-ip-ban install
+EXTRA_ARGS=("$@")
 
-Any extra options are passed to:
-  cdn_ip_ban.sh install [EXTRA_OPTIONS]
+# ── Download cdn_ip_ban.sh ────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
+LOCAL_SCRIPT="${SCRIPT_DIR}/cdn_ip_ban.sh"
 
-Examples:
-  sudo ./install.sh --provider=all --ipv6
-  sudo ./install.sh --no-apply
-  curl -fsSL <INSTALL_SH_URL> | sudo bash -s -- --raw-base=<RAW_BASE_URL>
-EOF
-}
-
-download_script() {
-    local url="$1"
-    local dest="$2"
-    local temp_file
-    temp_file=$(mktemp)
-
-    if command -v curl > /dev/null 2>&1; then
-        curl -fsSL --connect-timeout 30 --max-time 120 "$url" -o "$temp_file"
-    elif command -v wget > /dev/null 2>&1; then
-        wget -q --timeout=120 "$url" -O "$temp_file"
+if [[ -f "$LOCAL_SCRIPT" ]]; then
+    info "使用本地文件 / Using local file: $LOCAL_SCRIPT"
+    cp "$LOCAL_SCRIPT" "$INSTALL_PATH"
+else
+    info "从 GitHub 下载... / Downloading from GitHub..."
+    if command -v curl &>/dev/null; then
+        curl -fsSL --connect-timeout 30 --max-time 120 \
+            "${RAW_BASE}/cdn_ip_ban.sh" -o "$INSTALL_PATH"
+    elif command -v wget &>/dev/null; then
+        wget -q --timeout=120 "${RAW_BASE}/cdn_ip_ban.sh" -O "$INSTALL_PATH"
     else
-        echo "[ERROR] curl/wget not found; cannot download $url" >&2
-        return 1
+        error "curl 或 wget 未找到 / curl or wget not found"
     fi
+fi
 
-    mv -f "$temp_file" "$dest"
-}
+chmod 755 "$INSTALL_PATH"
+ln -sf "$INSTALL_PATH" "$LINK_PATH"
+success "已安装 / Installed: $INSTALL_PATH"
+success "命令链接 / Command:   cdn-ip-ban"
 
-parse_args() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --raw-base=*)
-                RAW_BASE_URL="${1#*=}"
-                shift
-                ;;
-            --script-sha256=*)
-                EXPECTED_SHA256="${1#*=}"
-                shift
-                ;;
-            --no-apply)
-                AUTO_APPLY=false
-                shift
-                ;;
-            --help|-h)
-                print_usage
-                exit 0
-                ;;
-            *)
-                APPLY_ARGS+=("$1")
-                shift
-                ;;
-        esac
-    done
-}
-
-main() {
-    if [[ $EUID -ne 0 ]]; then
-        echo "[ERROR] install.sh must be run as root" >&2
-        exit 1
-    fi
-
-    parse_args "$@"
-
-    local staged_path
-    staged_path=$(mktemp)
-
-    if [[ -f "$SOURCE_SCRIPT" ]]; then
-        cp "$SOURCE_SCRIPT" "$staged_path"
-    elif [[ -n "$RAW_BASE_URL" ]]; then
-        download_script "${RAW_BASE_URL%/}/cdn_ip_ban.sh" "$staged_path"
-        if [[ -z "$EXPECTED_SHA256" ]]; then
-            echo "[WARNING] raw download used without --script-sha256 verification" >&2
-        fi
-    else
-        rm -f "$staged_path"
-        echo "[ERROR] cdn_ip_ban.sh not found next to install.sh" >&2
-        echo "[INFO] use --raw-base=<raw_base_url> to download from GitHub raw" >&2
-        exit 1
-    fi
-
-    if [[ -n "$EXPECTED_SHA256" ]]; then
-        local actual_sha256
-        actual_sha256=$(sha256sum "$staged_path" | awk '{print $1}')
-        if [[ "$actual_sha256" != "$EXPECTED_SHA256" ]]; then
-            rm -f "$staged_path"
-            echo "[ERROR] sha256 mismatch for cdn_ip_ban.sh" >&2
-            echo "[ERROR] expected: $EXPECTED_SHA256" >&2
-            echo "[ERROR] actual:   $actual_sha256" >&2
-            exit 1
-        fi
-    fi
-
-    chmod 755 "$staged_path"
-
-    if [[ -f "$INSTALL_PATH" ]]; then
-        local backup_path
-        backup_path="${INSTALL_PATH}.bak.$(date +%Y%m%d%H%M%S)"
-        cp "$INSTALL_PATH" "$backup_path"
-        echo "[INFO] Backup:    $backup_path"
-    fi
-
-    mv -f "$staged_path" "$INSTALL_PATH"
-    ln -sf "$INSTALL_PATH" "$LINK_PATH"
-    echo "[INFO] Installed: $INSTALL_PATH"
-    echo "[INFO] Symlink:   $LINK_PATH"
-
-    # Install transparent_proxy.sh (cdn-ip-ban-tproxy)
-    local staged_tproxy
-    staged_tproxy=$(mktemp)
-    local tproxy_ok=false
-
-    if [[ -f "$SOURCE_TPROXY" ]]; then
-        cp "$SOURCE_TPROXY" "$staged_tproxy"
-        tproxy_ok=true
-    elif [[ -n "$RAW_BASE_URL" ]]; then
-        if download_script "${RAW_BASE_URL%/}/transparent_proxy.sh" "$staged_tproxy" 2>/dev/null; then
-            tproxy_ok=true
-        else
-            echo "[WARNING] Could not download transparent_proxy.sh; transparent proxy will not be available" >&2
-        fi
-    fi
-
-    if [[ "$tproxy_ok" = true ]]; then
-        chmod 755 "$staged_tproxy"
-        if [[ -f "$TPROXY_INSTALL_PATH" ]]; then
-            local tproxy_backup
-            tproxy_backup="${TPROXY_INSTALL_PATH}.bak.$(date +%Y%m%d%H%M%S)"
-            cp "$TPROXY_INSTALL_PATH" "$tproxy_backup"
-            echo "[INFO] Backup:    $tproxy_backup"
-        fi
-        mv -f "$staged_tproxy" "$TPROXY_INSTALL_PATH"
-        ln -sf "$TPROXY_INSTALL_PATH" "$TPROXY_LINK_PATH"
-        echo "[INFO] Installed: $TPROXY_INSTALL_PATH"
-        echo "[INFO] Symlink:   $TPROXY_LINK_PATH"
-    else
-        rm -f "$staged_tproxy"
-    fi
-
-    if [[ "$AUTO_APPLY" = true ]]; then
-        "$INSTALL_PATH" install "${APPLY_ARGS[@]}"
-        echo "[INFO] CDN blocking installed."
-    else
-        "$INSTALL_PATH" bypass-init
-        echo "[INFO] Install-only mode complete. Run '$LINK_PATH install' when ready."
-    fi
-}
-
-main "$@"
+# ── Apply blocking rules ──────────────────────────────────────────────────────
+info "正在应用封锁规则... / Applying block rules..."
+"$INSTALL_PATH" install "${EXTRA_ARGS[@]}"
