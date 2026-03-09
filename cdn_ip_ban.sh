@@ -38,7 +38,7 @@ readonly NC='\033[0m'
 
 # ── CLI defaults / 命令行默认值 ───────────────────────────────────────────────
 SELECTED_PROVIDERS="all"
-ENABLE_IPV6=false
+ENABLE_IPV6=true
 
 # ── Logging / 日志 ────────────────────────────────────────────────────────────
 log() {
@@ -364,7 +364,7 @@ show_usage() {
 
 选项 / Options:
   --provider=PROVIDER   cloudflare | fastly | akamai | all  (默认/default: all)
-  --ipv6                同时封锁 IPv6 / Also block IPv6
+  --no-ipv6             跳过 IPv6 封锁 / Skip IPv6 blocking (IPv6 is blocked by default)
 
 示例 / Examples:
   sudo cdn-ip-ban install
@@ -387,8 +387,8 @@ parse_arguments() {
                     validate_provider "$SELECTED_PROVIDERS"
                 fi
                 ;;
-            --ipv6)
-                ENABLE_IPV6=true
+            --no-ipv6)
+                ENABLE_IPV6=false
                 ;;
             --help|-h)
                 show_usage; exit 0
